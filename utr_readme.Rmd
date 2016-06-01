@@ -1,0 +1,240 @@
+---
+title: "Tiling the 3’ UTR Library"
+author: "Kimberly Insigne"
+date: "May 17, 2016"
+output: html_document
+---
+
+This library looks at all human 3' UTR sequences and tiles each sequence 150bp at a time, with 50bp overlap. The code shown in this document is taken directly from `annotate_3utr.R` and is shown for clarity, but this document does not generate the annotation. Changing `eval=T` in the code chunks will run the code. The library was based on GENCODE release 24 (`ftp://ftp.sanger.ac.uk/pub/gencode/Gencode_human/release_24/gencode.v24.annotation.gtf.gz`). Genomic coordinates are 1-based. The file can be unzipped using `gunzip`. The entire annotation was read into `R` and then trimmed to contain only gene, transcript, and UTR entries for faster future loading. This step was performed once. The GENCODE annotation includes UTRs but does not indicate whether they are 5' or 3', so we must use a script (`annotate_3utr.R`) to annotate which are the 3' UTRs we are interested in.
+
+```{r, echo=T, eval=T, warning=F, message=F}
+library(dplyr)
+library(ggplot2)
+setwd("~/Documents/projects/utr")
+
+# for faster loading
+# annot <- read.table('gencode.v24.annotation.gtf', header=F, sep='\t', comment.char='#', stringsAsFactors=F)
+# colnames(annot) <- c('chr', 'source', 'type', 'start', 'end', 'score', 'strand', 'phase', 'info')
+# annot <- filter(annot, type == 'gene' | type == 'transcript' | type == 'UTR')
+# write.table(annot, file='gencode.v24.annotation.trimmed.gtf', quote=F, col.names=T, row.names=F, sep='\t')
+
+annot <- read.table('gencode.v24.annotation.trimmed.gtf', header=F, sep='\t', comment.char='#', stringsAsFactors = F)
+colnames(annot) <- c('chr', 'source', 'type', 'start', 'end', 'score', 'strand', 'phase', 'info')
+
+# add id column for easy access later
+annot <- mutate(annot, id = c(1:nrow(annot)))
+```
+
+Additional information is stored in the last column in the `.gtf` file, here referred to as `info`, that contains information as key value pairs, with each pair separated by a semi-colon. We are interested in only the gene ID and transcript ID, so we must extract these first.
+
+```{r, echo=T, eval=T, warning=F, message=F}
+# extract gene_id and transcript id from info column
+fields <- strsplit(annot$info, ';')
+# for each element in fields, grab the 1st entry. Format: 'gene_id ENSG00000223972.5'. Then for each element in this list,
+# split by ' ' and grab the second element, to grab only the IDs
+gene_ids <- unlist( lapply( strsplit( unlist(lapply(fields, `[[`, 1)), ' '), `[[`, 2))
+
+# same logic as gene_ids, but transcript ids is the second field in fields. Also, there is a leading whitespace so the format is
+# " transcript_id ENST00000450305.2" and we grab the third element in this case
+transcript_ids <- unlist( lapply( strsplit( unlist(lapply(fields, `[[`, 2)), ' '), `[[`, 3))
+annot <- mutate(annot, gene_id = gene_ids, transcript_id = transcript_ids)
+
+# remove large vectors
+rm(list=c('gene_ids', 'transcript_ids'))
+# transcript id is only the second field when the type is transcript or UTR, otherwise it is gene type.
+# If element doesn't begin with ENST, replace with NA
+annot <- mutate(annot, transcript_id = ifelse(grepl('ENST', transcript_id), transcript_id, NA))
+```
+
+As a first step, let's look at how many transcripts there are per gene.
+```{r, echo=T, eval=T, warning=F, message=F}
+# how many transcripts per gene?
+transcript_counts <- annot %>% 
+                    group_by(gene_id) %>%
+                    summarise(count = n_distinct(transcript_id, na.rm=T))
+table(transcript_counts$count)
+```
+
+Next, let's see how many UTRs each transcript has.
+
+```{r, echo=T, eval=T, warning=F, message=F}
+# UTRs per transcript
+utr_counts <- annot %>%
+            group_by(transcript_id) %>%
+            summarise(utr_count = sum(type == 'UTR'))
+table(utr_counts$utr_count)
+```
+
+Over half of GENCODE transcripts do not have a UTR, while some have multiple because the UTR is spliced. To determine which UTR is the 3' UTR, we first consider all UTRs that are associated with a transcript (through their transcript ID). For each transcript, we define a midpoint halfway between the start and end point of the transcript. End coordinates are always greater than start coordinates, but defining where the 3' end lies depends on the transcript's strand (which is given). For transcripts on the positive strand, we define a UTR as a 3' UTR if the start point of the UTR is greater than the midpoint of the transcript. For transcripts on the negative strand, we define a UTR as a 3' UTR if the start point of the UTR is less than the midpoint of the transcript. 
+
+```{r, echo=T, eval=F, warning=F, message=F}
+# UTRs per transcript
+is_3UTR <- function(transcript_start, transcript_end, strand, utr_start, utr_end) {
+    # Define as 3' UTR if it falls in the second half of the transcript
+    midpoint <- transcript_start + ( (transcript_end - transcript_start)/2 )
+    if(strand == '+'){
+        if(utr_start > midpoint){ return(TRUE) }
+        else{ return(FALSE) }
+    }
+    if(strand == '-'){
+        if(utr_start < midpoint){ return(TRUE) }
+        else{ return(FALSE) }
+    }
+}
+```
+
+Now, let's annotate all UTRs. This next chunk takes awhile, about an hour, but only needs to be run once.
+
+```{r, echo=T, eval=F, warning=F, message=F}
+transcript_with_utr_ids <- filter(utr_counts, utr_count > 0) %>% select(transcript_id)
+transcript_with_utr <- filter(annot, transcript_id %in% transcript_with_utr_ids$transcript_id)
+# initialize empty column first, faster to access by index and change than it is to build and append new vector
+transcript_with_utr <- mutate(transcript_with_utr, is_3utr = rep(NA, nrow(transcript_with_utr)))
+
+for(transcript in unique(transcript_with_utr$transcript_id)){
+    info <- filter(transcript_with_utr, transcript_id == transcript)
+    transcript_info <- filter(info, type == 'transcript')
+    transcript_start <- transcript_info$start[1]
+    transcript_end <- transcript_info$end[1]
+    strand <- transcript_info$strand[1]
+    
+    utrs <- filter(info, type == 'UTR')
+    for(i in 1:nrow(utrs)){
+        utr_start <- utrs$start[i]
+        utr_end <- utrs$end[i]
+        is_3utr <- is_3UTR(transcript_start = transcript_start, transcript_end = transcript_end, strand = strand,
+                           utr_start = utr_start, utr_end = utr_end)
+        index <- which(transcript_with_utr$id == utrs$id[i])
+        # subset original data frame and change is_3utr value
+        transcript_with_utr$is_3utr[index] = is_3utr
+    }
+}
+
+# write those that are 3' UTR to file
+is_3utrs <- filter(transcript_with_utr, is_3utr == TRUE) %>% select(chr, start, end, strand, gene_id, transcript_id)
+write.table(is_3utrs, file='annotated_3UTR.tsv', col.names=T, row.names=F, quote=F, sep='\t')
+```
+
+There are `r nrow(is_3utrs)` 3' UTRs from the GENCODE annotation. Let's take a look at the size distribution of these UTRs.
+
+```{r, echo=F}
+lengths <- data.frame(length = (is_3utrs$end - is_3utrs$start) / 1000)
+ggplot(lengths, aes(x=length)) + geom_histogram(binwidth=0.5) + 
+    labs(x='UTR length (kb)', y='Frequency', title="Distribution of 3\' UTR lengths")
+```
+
+`r length(which(lengths$length <= 0.05))` of the 3' UTRs are 50bp or less. `r length(which(lengths$length >= .15))` are 150bp or larger.
+
+Questions:
+
+- How best to narrow down the number of UTRs to consider? Remove any regions that are subsets of a larger region (due to alternative splicing of the 3' UTR).
+- How to tile regions when length is not evenly divisible by 150? Pad the construct with extra DNA?
+
+From the paper [Massively parallel functional annotation of 3' UTRs](http://www.nature.com/nbt/journal/v32/n4/full/nbt.2851.html#methods) they constructed 128bp sequences spaced 4 bp apart and for shorter sequences to cover the ends of the sequence (4-124bp) they padded it with the [CXCL7 3' UTR](http://www.ncbi.nlm.nih.gov/nuccore/NM_002704) which had minimal regulatory effects in preliminary experiments.
+
+- What is a good minimum length? 150? A couple thousands UTRs are annotated as 2bp long.
+
+First, let's narrow down the number of UTRs by removing those that are subsets of others. What we want is a set of non-overlapping regions of UTRs for each gene.
+
+```{r, echo=T, message=F, warning=F}
+# load pre-calculated table of UTRs
+utrs <- read.table('annotated_3utr.tsv', sep='\t', header=T)
+# get rid of UTRs with same start and end coordinates
+utrs <- utrs %>%
+    group_by(start, end) %>%
+    filter(row_number() == 1)
+
+# create additional column with the length of the region
+utrs <- utrs %>% mutate(length = end - start) %>% arrange(gene_id, start, desc(end), desc(length))
+
+is_subset <- function(utr1, utr2){
+    return( isTRUE(utr2$start >= utr1$start) & isTRUE(utr2$end <= utr1$end))
+}
+
+is_overlap <- function(utr1, utr2){
+    # left overlap: utr2_start  utr1_start  utr2_end    utr1_end
+    left_overlap <- isTRUE(utr2$start < utr1$start) & isTRUE(utr1$start <= utr2$end) & isTRUE(utr2$end <= utr1$end)
+    # right overlap: utr1_start utr2_start  utr1_end    utr2_end
+    right_overlap <- isTRUE(utr2$end > utr1$end) & isTRUE(utr2$start <= utr1$end) & isTRUE(utr1$start <= utr2$start)
+    return(left_overlap | right_overlap)
+}
+
+get_overlap_region <- function(utr1, utr2){
+    # left overlap: utr2_start  utr1_start  utr2_end    utr1_end
+    left_overlap <- isTRUE(utr2$start < utr1$start) & isTRUE(utr1$start <= utr2$end) & isTRUE(utr2$end <= utr1$end)
+    # right overlap: utr1_start utr2_start  utr1_end    utr2_end
+    right_overlap <- isTRUE(utr2$end > utr1$end) & isTRUE(utr2$start <= utr1$end) & isTRUE(utr1$start <= utr2$start)
+    if(left_overlap){
+        new_region <- list(utr2$start, utr1$end)
+    }
+    if(right_overlap){
+        new_region <- list(utr1$start, utr2$end)
+    }
+    return(new_region)
+}
+    
+# trim_subset <- function(df){
+#     trimmed <- df %>% mutate(is_subset = NA)
+#     utr1 <- df[1,]
+#     if(nrow(df) == 1){
+#         return(select(trimmed, -is_subset))
+#     }
+#     else{
+#         trimmed$is_subset[1] = FALSE
+#         for(i in seq(2, nrow(df))){
+#             utr2 <- df[i,]
+#             trimmed$is_subset[i] = is_subset(utr1, utr2)
+#         }        
+#     }
+#     trimmed <- filter(trimmed, is_subset == FALSE)
+#     return(select(trimmed, -is_subset))
+# }
+
+distinct_regions <- function(df){
+    # add blank columns to check for subsets or overlaps
+    # the first entry is always the longest, so add it to trimmed 
+    trimmed <- df[1,] %>% mutate(new_start = NA, new_end = NA)
+    
+    for(i in seq(2, nrow(df))){
+        # compare to all rows already checked so far
+        for(j in seq(1, nrow(trimmed))){
+            utr1 = trimmed[j,]
+            utr2 = df[i,]
+            subset <- is_subset(utr1, utr2)
+            if(subset){
+                # don't include
+                next
+            }
+            overlap <- is_overlap(utr1, utr2)
+            if(overlap){
+                # modify region of entry already in trimmed
+                new_region <- get_overlap_region(utr1, utr2)
+                trimmed$new_start[j] <- new_region[[1]]
+                trimmed$new_end[j] <- new_region[[2]]
+            }
+            if((subset == FALSE) & (overlap == FALSE)){
+                trimmed <- rbind(trimmed, df[i,] %>% mutate(new_start=NA, new_end=NA))
+            }
+        }
+    }
+    # due to the nested loops, make sure to remove duplicates
+    return(distinct(trimmed))
+}
+
+# utrs_trimmed <- utrs
+# size = nrow(utrs)
+# new_size = 0
+# while(new_size != size)
+#     utrs_trimmed <- utrs_trimmed %>%
+#         group_by(gene_id) %>%
+#         do(trim_subset(.))
+#     new_size = nrow(utrs_trimmed)
+# }
+utrs_trimmed <- utrs %>%
+    group_by(gene_id) %>%
+    do(trim_subset(.))
+
+write.table(utrs_trimmed, 'annotated_3utr_trimmed.tsv', quote=F, col.names=T, row.names=F, sep='\t')
+```
+
+

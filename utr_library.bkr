@@ -1,0 +1,206 @@
+{
+    "beaker": "2",
+    "evaluators": [
+        {
+            "name": "HTML",
+            "plugin": "HTML",
+            "view": {
+                "cm": {
+                    "mode": "htmlmixed"
+                }
+            }
+        },
+        {
+            "name": "JavaScript",
+            "plugin": "JavaScript",
+            "view": {
+                "cm": {
+                    "mode": "javascript",
+                    "background": "#FFE0F0"
+                }
+            }
+        },
+        {
+            "name": "IPython",
+            "plugin": "IPython",
+            "setup": "%matplotlib inline\nimport numpy\nimport matplotlib\nfrom matplotlib import pylab, mlab, pyplot\nnp = numpy\nplt = pyplot\nfrom IPython.display import display\nfrom IPython.core.pylabtools import figsize, getfigs\nfrom pylab import *\nfrom numpy import *\n",
+            "view": {
+                "cm": {
+                    "mode": "python"
+                }
+            }
+        }
+    ],
+    "cells": [
+        {
+            "id": "codesVUGbK",
+            "type": "code",
+            "evaluator": "IPython",
+            "input": {
+                "body": [
+                    "import argparse",
+                    "import pandas as pd",
+                    "from pyfaidx import Fasta",
+                    "import os",
+                    "",
+                    "os.chdir('/Users/Kimberly/Documents/projects/utr')",
+                    "",
+                    "def reverse_complement(seq):",
+                    "\t\"\"\"",
+                    "\tReturn the reverse complement of a nucleotide string",
+                    "\t\"\"\"",
+                    "\tcomplement = {'A': 'T', 'T':'A', 'C':'G', 'G':'C'}",
+                    "\t",
+                    "\trc = ''.join([complement[nt] for nt in seq[::-1]])",
+                    "\treturn rc"
+                ]
+            },
+            "output": {
+                "state": {},
+                "selectedType": "Hidden",
+                "pluginName": "IPython",
+                "shellId": "91200FC38F984FB887F43A3B3FF47ECB",
+                "elapsedTime": 319,
+                "height": 81
+            },
+            "evaluatorReader": true,
+            "lineCount": 15
+        },
+        {
+            "id": "codehD2yEG",
+            "type": "code",
+            "evaluator": "IPython",
+            "input": {
+                "body": [
+                    "min_length = 5",
+                    "ref_file = './annotated_3UTR_trimmed.tsv'",
+                    "genome_file = './hg38.fa'",
+                    "",
+                    "# ref file must be tab separated with six columns and first line as header.",
+                    "ref = pd.read_table(ref_file, sep='\\t')",
+                    "genome = Fasta(genome_file, sequence_always_upper=True)",
+                    "# these are the chromosomes we care about",
+                    "chr_nums = [str(num) for num in range(1,23)] + ['X', 'Y', 'M']",
+                    "chr_names = ['chr' + num for num in chr_nums]",
+                    "",
+                    "genome = {x : genome[x] for x in genome.keys() if x in chr_names}",
+                    "",
+                    "print \"Number of 3' UTRs:\", len(ref)"
+                ]
+            },
+            "output": {
+                "state": {},
+                "selectedType": "Results",
+                "pluginName": "IPython",
+                "shellId": "91200FC38F984FB887F43A3B3FF47ECB",
+                "elapsedTime": 312,
+                "result": {
+                    "type": "Results",
+                    "outputdata": [
+                        {
+                            "type": "out",
+                            "value": "Number of 3' UTRs: 90603\n"
+                        }
+                    ]
+                },
+                "height": 55
+            },
+            "evaluatorReader": true,
+            "lineCount": 14
+        },
+        {
+            "id": "markdownJmSZpc",
+            "type": "markdown",
+            "body": [
+                "In order to improve coverage near the 5' and 3' ends of the 3' UTR, we need to include oligos that are <150 bp of sequence from the ends of the 3' UTR. In order to maintain a constant 150bp size, we need to pad the sequence by adding sequence from the CXCL7 3' UTR( NM_002704, 475-602) as done",
+                "in [Massively parallel functional annotation of 3' UTRs](http://www.nature.com/nbt/journal/v32/n4/full/nbt.2851.html#methods) that had minimal regulatory effects in their preliminary experiments."
+            ],
+            "evaluatorReader": false
+        },
+        {
+            "id": "codeJjoO8Z",
+            "type": "code",
+            "evaluator": "IPython",
+            "input": {
+                "body": [
+                    "# store library",
+                    "lib = {}",
+                    "",
+                    "fasta_file = open('cxcl7.fasta')",
+                    "stuffer = ''",
+                    "for line in fasta_file:",
+                    "    if line.startswith('>'):",
+                    "        continue",
+                    "    stuffer += line.strip()",
+                    "    ",
+                    "stuffer = stuffer[474:474+150]",
+                    "",
+                    "def check_and_stuff(seq):",
+                    "    if len(seq) < 150:",
+                    "        stuffed_seq = stuffer[:-len(seq)] + str(seq)",
+                    "        seq.seq = stuffed_seq",
+                    "    return seq",
+                    "",
+                    "# for each UTR",
+                    "for i in range(len(ref)):",
+                    "    chrom, start, end, strand, gene_id, transcript_id, length = list(ref.iloc[i])",
+                    "    # in pyfaidx start attributes are 1-based, end is 0-based",
+                    "    utr_seq = genome[chrom][start-1:end]",
+                    "    if length >= min_length:",
+                    "        tiled_seqs = [utr_seq[i:i+150] for i in range(0, len(utr_seq), 50)]",
+                    "        # check if sequences are too short",
+                    "        stuffed_seqs = [check_and_stuff(seq) for seq in tiled_seqs]",
+                    "        for seq in stuffed_seqs:",
+                    "            # these are pyfaidx objects and sequences are named, grab name information",
+                    "            name = '_'.join([seq.name, str(seq.start), str(seq.end)])",
+                    "            lib[name] = seq.seq",
+                    "",
+                    "print \"Library size:\", len(lib)"
+                ]
+            },
+            "output": {
+                "state": {},
+                "result": {
+                    "type": "Results",
+                    "outputdata": [
+                        {
+                            "type": "out",
+                            "value": "Library size: 966649\n"
+                        }
+                    ]
+                },
+                "selectedType": "Results",
+                "pluginName": "IPython",
+                "shellId": "91200FC38F984FB887F43A3B3FF47ECB",
+                "elapsedTime": 262,
+                "dataresult": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                    19,
+                    20,
+                    21
+                ],
+                "height": 55
+            },
+            "evaluatorReader": true,
+            "lineCount": 33
+        }
+    ],
+    "namespace": {}
+}
